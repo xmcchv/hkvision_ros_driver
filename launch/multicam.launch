@@ -9,6 +9,8 @@
         <param name="channel" value="1"/>
         <param name="topic_name" value="/hikcam_left"/>
         <param name="target_fps" value="10" />
+        <param name="reference_topic" value="/rslidar_left" />
+        <param name="max_time_diff" value="0.05" />
     </node>
 
     <!-- 右相机节点 -->
@@ -20,6 +22,8 @@
         <param name="channel" value="1"/>
         <param name="topic_name" value="/hikcam_right"/>
         <param name="target_fps" value="10" />
+        <param name="reference_topic" value="/hikcam_left" />
+        <param name="max_time_diff" value="0.05" />
     </node>
     
 
