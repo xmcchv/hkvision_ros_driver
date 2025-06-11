@@ -1,0 +1,26 @@
+<launch>
+    <param name="/use_sim_time" value="false"/>
+    <!-- 左相机节点 -->
+    <node pkg="hikrobot_camera" type="hkvision" name="hikrobot_camera_left" output="screen">
+        <param name="ip" value="192.168.1.150"/>
+        <param name="port" value="8000"/>
+        <param name="username" value="admin"/>
+        <param name="password" value="Ydkj147258"/>
+        <param name="channel" value="1"/>
+        <param name="topic_name" value="/hikcam_left"/>
+        <param name="target_fps" value="10" />
+    </node>
+
+    <!-- 右相机节点 -->
+    <node pkg="hikrobot_camera" type="hkvision" name="hikrobot_camera_right" output="screen">
+        <param name="ip" value="192.168.1.160"/>
+        <param name="port" value="8000"/>
+        <param name="username" value="admin"/>
+        <param name="password" value="Ydkj147258"/>
+        <param name="channel" value="1"/>
+        <param name="topic_name" value="/hikcam_right"/>
+        <param name="target_fps" value="10" />
+    </node>
+    
+
+</launch>

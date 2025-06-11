@@ -1,0 +1,30 @@
+<launch>
+    <!-- 左相机节点 -->
+    <node pkg="hikrobot_camera" type="hkvision" name="hikrobot_camera_left" respawn="true" output="screen">
+        <param name="ip" value="192.168.1.150"/>
+        <param name="port" value="8000"/>
+        <param name="username" value="admin"/>
+        <param name="password" value="Ydkj147258"/>
+        <param name="channel" value="1"/>
+        <param name="topic_name" value="/hkcam_left_rgb"/>
+    </node>
+
+    <!-- 右相机节点 -->
+    <node pkg="hikrobot_camera" type="hkvision" name="hikrobot_camera_right" respawn="true" output="screen">
+        <param name="ip" value="192.168.1.160"/>
+        <param name="port" value="8000"/>
+        <param name="username" value="admin"/>
+        <param name="password" value="Ydkj147258"/>
+        <param name="channel" value="1"/>
+        <param name="topic_name" value="/hkcam_right_rgb"/>
+    </node>
+
+    <!-- 使用rosbag录制左相机话题 -->
+    <node pkg="rosbag" type="record" name="rosbag_record_left" args="-O left_camera_data /hkcam_left_rgb" />
+
+    <!-- 使用rosbag录制右相机话题 -->
+    <node pkg="rosbag" type="record" name="rosbag_record_right" args="-O right_camera_data /hkcam_right_rgb" />
+
+    <!-- RViz 可视化 -->
+    <node pkg="rviz" type="rviz" name="rviz" args="-d $(find hikrobot_camera)/rviz_config/multihik.rviz" />
+</launch>
