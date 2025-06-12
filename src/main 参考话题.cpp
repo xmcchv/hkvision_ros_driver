@@ -18,8 +18,7 @@
 #include <ros/ros.h>
 #include <cv_bridge/cv_bridge.h>
 #include <sensor_msgs/Image.h>
-#include <std_msgs/Header.h>  
-#include <sensor_msgs/PointCloud2.h>
+#include <std_msgs/Header.h>  // 添加标准消息头
 
 #include "HCNetSDK.h"
 #include "LinuxPlayM4.h"
@@ -66,15 +65,14 @@ public:
         std::lock_guard<std::mutex> lock(ptp_mutex);
         ros::Time now = ros::Time::now();
         
-        if ((now - last_sync_time).toSec() > 0.1) {
+        // 每0.5秒重新校准一次
+        if ((now - last_sync_time).toSec() > 0.5) {
             struct ptp_clock_time ptp_time;
             if (ioctl(ptp_fd, PTP_CLOCK_GETTIME, &ptp_time) == 0) {
                 ros::Time ptp_now(ptp_time.sec, ptp_time.nsec);
                 offset = ptp_now - now;
                 last_sync_time = now;
-                #ifdef USE_LOG
                 ROS_DEBUG("PTP offset updated: %.9f sec", offset.toSec());
-                #endif
             }
         }
         
@@ -89,12 +87,10 @@ private:
     std::mutex ptp_mutex;
 };
 
+// 时间戳对齐管理器
 class TimestampAligner {
 public:
-    TimestampAligner() : ref_stamp_valid(false), 
-                        max_time_diff(0.1),
-                        window_size(10),  
-                        filtered_diff(0) {}
+    TimestampAligner() : ref_stamp_valid(false), max_time_diff(0.1) {}
     
     void setMaxTimeDiff(double diff) {
         max_time_diff = diff;
@@ -105,30 +101,27 @@ public:
         ref_stamp = header.stamp;
         last_ref_update = ros::Time::now();
         ref_stamp_valid = true;
-        #ifdef USE_LOG
         ROS_DEBUG("Updated reference stamp: %f", ref_stamp.toSec());
-        #endif
     }
     
     ros::Time alignTimestamp(const ros::Time& img_stamp) {
         std::lock_guard<std::mutex> lock(ref_mutex);
         
+        // 如果没有有效参考或参考时间太旧，使用原始时间戳
         if (!ref_stamp_valid || (ros::Time::now() - last_ref_update).toSec() > max_time_diff) {
-            #ifdef USE_LOG
             ROS_WARN_THROTTLE(5.0, "No valid reference timestamp, using original image time");
-            #endif
             return img_stamp;
         }
         
+        // 计算时间差并检查是否在允许范围内
         double time_diff = (img_stamp - ref_stamp).toSec();
         if (fabs(time_diff) > max_time_diff) {
-            #ifdef USE_LOG
             ROS_WARN_THROTTLE(1.0, "Large time difference: %.3fs (img:%.3f ref:%.3f). Using reference time.", 
                              time_diff, img_stamp.toSec(), ref_stamp.toSec());
-            #endif
             return ref_stamp;
         }
         
+        // 在允许范围内，使用参考时间戳
         return ref_stamp;
     }
 
@@ -138,10 +131,6 @@ private:
     bool ref_stamp_valid;
     double max_time_diff;
     std::mutex ref_mutex;
-    // 滑动窗口容器
-    std::deque<double> time_diff_window;
-    double filtered_diff = 0;
-    int window_size = 10;
 };
 
 // 图像缓存管理器
@@ -190,14 +179,6 @@ void CALLBACK G_DecCBFun(int nPort, char * pBuf, int nSize, FRAME_INFO * pFrameI
 // 参考话题回调函数
 void referenceCallback(const std_msgs::Header::ConstPtr& msg) {
     timestamp_aligner.updateReference(*msg);
-}
-
-void referenceCallback(const sensor_msgs::Image::ConstPtr& msg) {
-    timestamp_aligner.updateReference(msg->header);
-}
-
-void referenceCallback(const sensor_msgs::PointCloud2::ConstPtr& msg) {
-    timestamp_aligner.updateReference(msg->header);
 }
 
 LONG G_nPort = -1;
@@ -266,6 +247,30 @@ void GetStream(const std::string& ip, int port, const std::string& username,
     NET_DVR_Cleanup();
 }
 
+void publishThreadFunc() {
+    ros::Rate rate(target_fps);
+    
+    while (ros::ok()) {
+        cv::Mat current_image;
+        ros::Time image_stamp;
+        
+        if (image_cache.getLatest(current_image, image_stamp)) {
+            // 对齐时间戳
+            ros::Time aligned_stamp = timestamp_aligner.alignTimestamp(image_stamp);
+            
+            sensor_msgs::ImagePtr msg = cv_bridge::CvImage(std_msgs::Header(), "bgr8", current_image).toImageMsg();
+            msg->header.stamp = aligned_stamp;  // 使用对齐后的时间戳
+            msg->header.frame_id = "hikrobot_camera";
+            image_pub.publish(msg);
+            
+            ROS_DEBUG_THROTTLE(1.0, "Published image. Original: %.3f, Aligned: %.3f", 
+                              image_stamp.toSec(), aligned_stamp.toSec());
+        }
+        
+        rate.sleep();
+    }
+}
+
 int main(int argc, char **argv) {
     ros::init(argc, argv, "hikrobot_camera");
     ros::NodeHandle nh("~");
@@ -282,7 +287,7 @@ int main(int argc, char **argv) {
     }
 
     // 获取相机参数
-    std::string ip, username, password, image_topic, reference_topic, reference_topic_type;
+    std::string ip, username, password, image_topic, reference_topic;
     double max_time_diff;
     int port, channel;
     nh.param<std::string>("ip", ip, "");
@@ -292,7 +297,6 @@ int main(int argc, char **argv) {
     nh.param<int>("channel", channel, 1);
     nh.param<std::string>("topic_name", image_topic, "hikrobot/image");
     nh.param<std::string>("reference_topic", reference_topic, "");  // 参考话题名称
-    nh.param<std::string>("reference_topic_type", reference_topic_type, "sensor_msgs/PointCloud2");  // 参考话题名称
     nh.param<double>("max_time_diff", max_time_diff, 0.1);  // 最大允许时间差
     
     // 设置最大时间差
@@ -304,14 +308,7 @@ int main(int argc, char **argv) {
     // 如果配置了参考话题，则订阅它
     ros::Subscriber ref_sub;
     if (!reference_topic.empty()) {
-        if(reference_topic_type == "sensor_msgs/PointCloud2"){
-            ref_sub = nh.subscribe<sensor_msgs::PointCloud2>(reference_topic, 10, referenceCallback);
-        }else if(reference_topic_type == "sensor_msgs/Image"){
-            ref_sub = nh.subscribe<sensor_msgs::Image>(reference_topic, 10, referenceCallback);
-        }else{
-            ref_sub = nh.subscribe<std_msgs::Header>(reference_topic, 10, referenceCallback);
-        }
-        
+        ref_sub = nh.subscribe(reference_topic, 10, referenceCallback);
         ROS_INFO("Subscribed to reference topic: %s", reference_topic.c_str());
     } else {
         ROS_WARN("No reference topic specified. Timestamps will not be aligned.");
@@ -320,30 +317,12 @@ int main(int argc, char **argv) {
     // 启动视频流线程
     std::thread stream_thread(GetStream, ip, port, username, password, channel);
     
-    // 启动发布循环
-    ros::Rate rate(target_fps);
-    cv::Mat current_image;
-    ros::Time image_stamp;
-    ros::Time aligned_stamp;
-    while (ros::ok()) {
-        if (image_cache.getLatest(current_image, image_stamp)) {
-            // 对齐时间戳
-            aligned_stamp = timestamp_aligner.alignTimestamp(image_stamp);
-            
-            sensor_msgs::ImagePtr msg = cv_bridge::CvImage(std_msgs::Header(), "bgr8", current_image).toImageMsg();
-            msg->header.stamp = aligned_stamp;  // 使用对齐后的时间戳
-            msg->header.frame_id = "hikrobot_camera";
-            image_pub.publish(msg);
-            #ifdef USE_LOG
-            ROS_DEBUG_THROTTLE(1.0, "Published image. Original: %.3f, Aligned: %.3f", 
-                              image_stamp.toSec(), aligned_stamp.toSec());
-            #endif
-        }
-        rate.sleep();
-    }
+    // 启动发布线程
+    std::thread publish_thread(publishThreadFunc);
     
     ros::spin();
     
+    publish_thread.join();
     stream_thread.join();
     return 0;
 }
