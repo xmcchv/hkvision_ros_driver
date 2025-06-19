@@ -115,6 +115,72 @@ private:
 ImageCache image_cache;
 TimestampAligner timestamp_aligner;  // 全局时间戳对齐器
 
+
+// 时间戳序列生成器
+class TimestampSequenceGenerator {
+public:
+    TimestampSequenceGenerator() : active(false), frame_count(0) {}
+    
+    void startSequence(const ros::Time& ref_stamp, const ros::Time& recv_time, double target_interval) {
+        std::lock_guard<std::mutex> lock(mutex);
+        sequence_start = ref_stamp;
+        last_recv_time = recv_time;
+        expected_interval = ros::Duration(target_interval);
+        frame_count = 0;
+        active = true;
+        
+        // 计算实际与理论帧间隔的偏差
+        if (last_ref_stamp.isValid()) {
+            ros::Duration actual_interval = recv_time - last_ref_recv_time;
+            interval_error = actual_interval - ros::Duration(target_interval * frame_count);
+        }
+        last_ref_stamp = ref_stamp;
+        last_ref_recv_time = recv_time;
+    }
+    
+    ros::Time getNextTimestamp() {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!active) return ros::Time(0);
+        
+        // 生成当前帧的时间戳: 参考时间起点 + (帧数 * 帧间隔) + 偏差补偿
+        ros::Time stamp = sequence_start + 
+                          ros::Duration(frame_count * expected_interval.toSec()) + 
+                          interval_error * (frame_count / (frame_count + 1.0));
+        
+        frame_count++;
+        return stamp;
+    }
+    
+    bool isActive() const { return active; }
+    void deactivate() { active = false; }
+
+private:
+    ros::Time sequence_start;
+    ros::Time last_recv_time;
+    ros::Time last_ref_stamp;
+    ros::Time last_ref_recv_time;
+    ros::Duration expected_interval;
+    ros::Duration interval_error;
+    int frame_count;
+    bool active;
+    std::mutex mutex;
+};
+
+// 全局时间戳生成器
+TimestampSequenceGenerator timestamp_generator;
+
+// 参考时间戳处理
+void handleReferenceStamp(const ros::Time& ref_stamp) {
+    ros::Time now = ros::Time::now();
+    timestamp_generator.startSequence(ref_stamp, now, 1.0/target_fps);
+    last_reference_time = ref_stamp;
+}
+
+// 参考话题回调函数
+void referenceCallback(const std_msgs::Header::ConstPtr& msg) {
+    handleReferenceStamp(msg->stamp);
+}
+
 // 解码回调
 void CALLBACK G_DecCBFun(int nPort, char * pBuf, int nSize, FRAME_INFO * pFrameInfo, void* nReserved1, int nReserved2) {
     if (pFrameInfo->nType == T_YV12) {
@@ -152,26 +218,29 @@ void CALLBACK G_DecCBFun(int nPort, char * pBuf, int nSize, FRAME_INFO * pFrameI
         cv::Mat bgr_frame;
         cv::cvtColor(yv12_frame, bgr_frame, cv::COLOR_YUV2BGR_YV12);
 
-        // 使用参考时间戳（如果可用）或当前时间
-        ros::Time image_stamp = timestamp_aligner.alignTimestamp(current_time);
-        image_cache.update(bgr_frame, image_stamp);
+        ros::Time image_stamp;
+        if (timestamp_generator.isActive()) {
+            image_stamp = timestamp_generator.getNextTimestamp();
+        } else {
+            image_stamp = ros::Time::now();
+            ROS_WARN_THROTTLE(1.0, "No active reference sequence, using system time");
+        }
         
-        ROS_DEBUG_THROTTLE(1.0, "Frame processed. Actual FPS: %.2f, Compensation: %.3fms", 
-                          actual_fps, compensation.toSec() * 1000);
+        image_cache.update(bgr_frame, image_stamp);
     }
 }
 
 // 参考话题回调函数
-void referenceCallback(const std_msgs::Header::ConstPtr& msg) {
-    timestamp_aligner.updateReference(*msg);
-}
+// void referenceCallback(const std_msgs::Header::ConstPtr& msg) {
+//     timestamp_aligner.updateReference(*msg);
+// }
 
 void referenceCallback(const sensor_msgs::Image::ConstPtr& msg) {
-    timestamp_aligner.updateReference(msg->header);
+    referenceCallback(msg->header);
 }
 
 void referenceCallback(const sensor_msgs::PointCloud2::ConstPtr& msg) {
-    timestamp_aligner.updateReference(msg->header);
+    referenceCallback(msg->header);
 }
 
 LONG G_nPort = -1;
@@ -246,7 +315,13 @@ void publishThreadFunc() {
     while (ros::ok()) {
         cv::Mat current_image;
         ros::Time image_stamp;
-        
+        if (timestamp_generator.isActive()) {
+            ros::Time now = ros::Time::now();
+            if ((now - last_reference_time).toSec() > 1.5 * (1.0/target_fps)) {
+                timestamp_generator.deactivate();
+                ROS_WARN("Reference timestamp expired. Deactivating sequence.");
+            }
+        }
         if (image_cache.getLatest(current_image, image_stamp)) {
             sensor_msgs::ImagePtr msg = cv_bridge::CvImage(std_msgs::Header(), "bgr8", current_image).toImageMsg();
             msg->header.stamp = image_stamp;

@@ -14,6 +14,11 @@ if(USE_COMPRESS)
     add_definitions(-DUSE_COMPRESS)
 endif()
 
+set(USE_LOG OFF)
+if(USE_LOG)
+    add_definitions(-DUSE_LOG)
+endif()
+
 # 指定 C++ 版本
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
