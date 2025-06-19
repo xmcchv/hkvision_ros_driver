@@ -6,6 +6,10 @@
     <arg name="password" default="Ydkj147258"/>
     <arg name="channel" default="1"/>
     <arg name="topic_name" default="/hikcam_left"/>
+    <arg name="reference_topic" default="/rslidar_left"/>
+    <arg name="reference_topic_type" default="sensor_msgs/PointCloud2"/>
+    <arg name="max_time_diff" default="0.05"/>
+
 
     <!-- 启动ROS节点 -->
     <node pkg="hikrobot_camera" type="hkvision" name="hikrobot_camera_left" output="screen">
@@ -16,5 +20,8 @@
         <param name="password" value="$(arg password)"/>
         <param name="channel" value="$(arg channel)"/>
         <param name="topic_name" value="$(arg topic_name)"/>
+        <param name="reference_topic" value="$(arg reference_topic)" />
+        <param name="reference_topic_type" value="$(arg reference_topic_type)" />
+        <param name="max_time_diff" value="$(arg max_time_diff)" />
     </node>
 </launch>
