@@ -173,17 +173,15 @@ private:
 ImageCache image_cache;
 TimestampAligner timestamp_aligner;  // 全局时间戳对齐器
 
-// 解码回调
+// 解码回调 - 修改后只负责拷贝数据
 void CALLBACK G_DecCBFun(int nPort, char * pBuf, int nSize, FRAME_INFO * pFrameInfo, void* nReserved1, int nReserved2) {
     if (pFrameInfo->nType == T_YV12) {
         static PTPSynchronizer ptp_sync;
         ros::Time current_ptp = ptp_sync.getSynchronizedTime();
 
         cv::Mat yv12_frame(pFrameInfo->nHeight + pFrameInfo->nHeight/2, pFrameInfo->nWidth, CV_8UC1, pBuf);
-        cv::Mat bgr_frame;
-        cv::cvtColor(yv12_frame, bgr_frame, cv::COLOR_YUV2BGR_YV12);
-
-        image_cache.update(bgr_frame, current_ptp);
+        
+        image_cache.update(yv12_frame, current_ptp);
     }
 }
 
@@ -327,10 +325,14 @@ int main(int argc, char **argv) {
     ros::Time aligned_stamp;
     while (ros::ok()) {
         if (image_cache.getLatest(current_image, image_stamp)) {
+            // 在这里进行YUV到BGR的转换（从回调移出）
+            cv::Mat bgr_frame;
+            cv::cvtColor(current_image, bgr_frame, cv::COLOR_YUV2BGR_YV12);
+            
             // 对齐时间戳
             aligned_stamp = timestamp_aligner.alignTimestamp(image_stamp);
             
-            sensor_msgs::ImagePtr msg = cv_bridge::CvImage(std_msgs::Header(), "bgr8", current_image).toImageMsg();
+            sensor_msgs::ImagePtr msg = cv_bridge::CvImage(std_msgs::Header(), "bgr8", bgr_frame).toImageMsg();
             msg->header.stamp = aligned_stamp;  // 使用对齐后的时间戳
             msg->header.frame_id = "hikrobot_camera";
             image_pub.publish(msg);
