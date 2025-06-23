@@ -24,6 +24,10 @@
 #include "HCNetSDK.h"
 #include "LinuxPlayM4.h"
 
+#ifndef PTP_CLOCK_GETTIME
+#define PTP_CLOCK_GETTIME _IOR('P', 0x0e, struct ptp_clock_time)
+#endif
+
 // 图像缓存结构
 struct TimestampedImage {
     cv::Mat image;
@@ -35,6 +39,7 @@ struct TimestampedImage {
 std::mutex image_mutex;
 ros::Publisher image_pub;
 int target_fps = 25; // 默认帧率
+std::string ptp_device = "/dev/ptp0";
 
 // 时间同步器类
 class PTPSynchronizer {
@@ -142,9 +147,9 @@ private:
 // 图像缓存管理器
 class ImageCache {
 public:
-    void update(const cv::Mat& img, const ros::Time& stamp) {
+    void update(cv::Mat&& img, const ros::Time& stamp) {  // 使用右值引用
         std::lock_guard<std::mutex> lock(mutex_);
-        latest_image_ = img.clone();
+        latest_image_ = std::move(img);  // 移动而非拷贝
         latest_stamp_ = stamp;
         valid_ = true;
     }
@@ -152,8 +157,9 @@ public:
     bool getLatest(cv::Mat& img, ros::Time& stamp) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!valid_) return false;
-        img = latest_image_.clone();
+        img = std::move(latest_image_);  // 移动而非拷贝
         stamp = latest_stamp_;
+        valid_ = false;  // 标记为已取走
         return true;
     }
 
@@ -174,9 +180,12 @@ void CALLBACK G_DecCBFun(int nPort, char * pBuf, int nSize, FRAME_INFO * pFrameI
         static PTPSynchronizer ptp_sync;
         ros::Time current_ptp = ptp_sync.getSynchronizedTime();
 
-        cv::Mat yv12_frame(pFrameInfo->nHeight + pFrameInfo->nHeight/2, pFrameInfo->nWidth, CV_8UC1, pBuf);
-        
-        image_cache.update(yv12_frame, current_ptp);
+        cv::Mat yv12_frame(pFrameInfo->nHeight + pFrameInfo->nHeight/2, 
+                          pFrameInfo->nWidth, 
+                          CV_8UC1, 
+                          pBuf);
+
+        image_cache.update(std::move(yv12_frame), current_ptp);
     }
 }
 
@@ -319,10 +328,10 @@ int main(int argc, char **argv) {
     ros::Time image_stamp;
     ros::Time aligned_stamp;
     while (ros::ok()) {
-        if (image_cache.getLatest(current_image, image_stamp)) {
-            // 在这里进行YUV到BGR的转换（从回调移出）
+        cv::Mat yv12_image;
+        if (image_cache.getLatest(yv12_image, image_stamp)) {
             cv::Mat bgr_frame;
-            cv::cvtColor(current_image, bgr_frame, cv::COLOR_YUV2BGR_YV12);
+            cv::cvtColor(yv12_image, bgr_frame, cv::COLOR_YUV2BGR_YV12);
             
             // 对齐时间戳
             aligned_stamp = timestamp_aligner.alignTimestamp(image_stamp);
@@ -338,63 +347,4 @@ int main(int argc, char **argv) {
         }
         rate.sleep();
     }
-}
-
-int main(int argc, char **argv) {
-    ros::init(argc, argv, "hikrobot_camera");
-    ros::NodeHandle nh("~");
-    
-    // 从参数服务器获取配置
-    nh.param<int>("target_fps", target_fps, 25);
-    frame_interval = ros::Duration(1.0 / target_fps);
-    
-    // 获取相机参数
-    std::string ip, username, password, image_topic, reference_topic, reference_topic_type;
-    double max_time_diff;
-    int port, channel;
-    nh.param<std::string>("ip", ip, "");
-    nh.param<int>("port", port, 8000);
-    nh.param<std::string>("username", username, "admin");
-    nh.param<std::string>("password", password, "12345");
-    nh.param<int>("channel", channel, 1);
-    nh.param<std::string>("topic_name", image_topic, "hikrobot/image");
-    nh.param<std::string>("reference_topic", reference_topic, "");  // 参考话题名称
-    nh.param<std::string>("reference_topic_type", reference_topic_type, "sensor_msgs/PointCloud2");  // 参考话题名称
-    nh.param<double>("max_time_diff", max_time_diff, 0.1);  // 最大允许时间差
-    
-    // 设置最大时间差
-    timestamp_aligner.setMaxTimeDiff(max_time_diff);
-    
-    ROS_INFO("Starting camera driver with FPS: %d", target_fps);
-    image_pub = nh.advertise<sensor_msgs::Image>(image_topic, 1);
-    
-    // 如果配置了参考话题，则订阅它
-    ros::Subscriber ref_sub;
-    if (!reference_topic.empty()) {
-        if(reference_topic_type == "sensor_msgs/PointCloud2"){
-            ref_sub = nh.subscribe<sensor_msgs::PointCloud2>(reference_topic, 10, referenceCallback);
-        }else if(reference_topic_type == "sensor_msgs/Image"){
-            ref_sub = nh.subscribe<sensor_msgs::Image>(reference_topic, 10, referenceCallback);
-        }else{
-            ref_sub = nh.subscribe<std_msgs::Header>(reference_topic, 10, referenceCallback);
-        }
-        
-        ROS_INFO("Subscribed to reference topic: %s", reference_topic.c_str());
-    } else {
-        ROS_WARN("No reference topic specified. Timestamps will not be aligned.");
-    }
-    
-    // 初始化时间点
-    last_callback_time = std::chrono::steady_clock::now();
-    
-    // 启动视频流线程
-    std::thread stream_thread(GetStream, ip, port, username, password, channel);
-    
-    // 启动发布线程
-    std::thread publish_thread(publishThreadFunc);
-    
-    ros::spin();
-    
-    stream_thread.join();
-    return 0;
 }
